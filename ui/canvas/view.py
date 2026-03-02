@@ -21,7 +21,14 @@ from PySide6.QtGui import QPixmap, QTransform, QColor, QPen, QBrush, QPixmapCach
 
 from ui.qt_compat import Qt, QPainter, QGraphicsItem
 
-from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint, EventTrigger
+from models.path_model import (
+    Path,
+    PathElement,
+    TranslationTarget,
+    RotationTarget,
+    Waypoint,
+    EventTrigger,
+)
 from models.simulation import simulate_path, SimResult
 from .constants import (
     FIELD_LENGTH_METERS,
@@ -38,6 +45,12 @@ from .constants import (
     ZOOM_STEP_FACTOR,
     SIMULATION_UPDATE_INTERVAL_MS,
     SIMULATION_DEBOUNCE_INTERVAL_MS,
+    SELECTION_PULSE_INTERVAL_MS,
+    SELECTION_PULSE_STEP_RAD,
+    SELECTION_PULSE_MIN_ALPHA,
+    SELECTION_PULSE_MAX_ALPHA,
+    SELECTION_PULSE_WIDTH_SCALE_MIN,
+    SELECTION_PULSE_WIDTH_SCALE_MAX,
 )
 from .items.elements import (
     CircleElementItem,
@@ -65,6 +78,7 @@ def _get_translation_position(element: Any) -> Tuple[float, float]:
 class CanvasView(QGraphicsView):
     # Signals (mirroring original)
     elementSelected = Signal(int)
+    selectionCleared = Signal()
     elementMoved = Signal(int, float, float)
     elementRotated = Signal(int, float)
     elementDragFinished = Signal(int)
@@ -108,12 +122,27 @@ class CanvasView(QGraphicsView):
         self._field_offset: float = FIELD_OFFSET_M  # 0.5m for 2026
         self.graphics_scene = QGraphicsScene(self)
         self.setScene(self.graphics_scene)
+        self.graphics_scene.selectionChanged.connect(self._on_scene_selection_changed)
         self.graphics_scene.setSceneRect(0, 0, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS)
         self._field_pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._path: Optional[Path] = None
         self._items: List[Tuple[str, RectElementItem, Optional[RotationHandle]]] = []
         self._connect_lines: List[QGraphicsLineItem] = []
         self._handoff_visualizers: List[Optional[HandoffRadiusVisualizer]] = []
+        self._selection_pulse_phase: float = 0.0
+        self._selection_pulse_alpha: float = SELECTION_PULSE_MAX_ALPHA
+        self._selection_pulse_width_scale: float = 1.0
+        self._last_selected_items: set[QGraphicsItem] = set()
+        self._active_press_index: Optional[int] = None
+        self._press_moved: bool = False
+        self._press_rotated: bool = False
+        self._press_start_scene_pos: Optional[QPointF] = None
+        self._press_start_angle_radians: Optional[float] = None
+        self._press_move_epsilon_sq: float = 1e-6
+        self._press_rotation_epsilon_rad: float = math.radians(0.05)
+        self._selection_pulse_timer: QTimer = QTimer(self)
+        self._selection_pulse_timer.setInterval(SELECTION_PULSE_INTERVAL_MS)
+        self._selection_pulse_timer.timeout.connect(self._on_selection_pulse_tick)
         self._load_field_background(":/assets/field26.png")
         # Simulation state
         self._sim_result: Optional[SimResult] = None
@@ -176,11 +205,13 @@ class CanvasView(QGraphicsView):
     # ------------- Path / Items -------------
     def set_path(self, path: Path):
         self._path = path
+        self._last_selected_items.clear()
         try:
             self.clear_constraint_range_overlay()
         except Exception:
             pass
         self._rebuild_items()
+        self._on_scene_selection_changed()
         if self._path:
             self._reproject_rotation_items_in_scene()
         self.request_simulation_rebuild()
@@ -316,7 +347,51 @@ class CanvasView(QGraphicsView):
         self._update_connecting_lines()
         self.request_simulation_rebuild()
 
-    def select_index(self, index: int):
+    def select_index(self, index: int, center_on_item: bool = True):
+        if index is None or index < 0 or index >= len(self._items):
+            return
+        try:
+            _, item, _ = self._items[index]
+        except Exception:
+            return
+        if item is None:
+            return
+        try:
+            if item.scene() is None:
+                return
+        except Exception:
+            return
+        # Avoid deselect/reselect churn when the requested item is already selected.
+        # This breaks the canvas <-> sidebar feedback loop that can cause visible flicker.
+        try:
+            selected_items = self.graphics_scene.selectedItems()
+        except Exception:
+            selected_items = []
+        if len(selected_items) == 1 and selected_items[0] is item:
+            if center_on_item:
+                QTimer.singleShot(0, lambda it=item: self._safe_center_on(it))
+            return
+        try:
+            self.graphics_scene.clearSelection()
+            item.setSelected(True)
+            if center_on_item:
+                QTimer.singleShot(0, lambda it=item: self._safe_center_on(it))
+        except Exception:
+            return
+
+    def clear_selection(self) -> bool:
+        try:
+            had_selection = bool(self.graphics_scene.selectedItems())
+        except Exception:
+            had_selection = False
+        try:
+            self.graphics_scene.clearSelection()
+        except Exception:
+            pass
+        return had_selection
+
+    def _ensure_pressed_item_selected(self, index: int) -> None:
+        """Ensure the pressed item is selected without redundant churn."""
         if index is None or index < 0 or index >= len(self._items):
             return
         try:
@@ -331,11 +406,113 @@ class CanvasView(QGraphicsView):
         except Exception:
             return
         try:
+            selected_items = self.graphics_scene.selectedItems()
+        except Exception:
+            selected_items = []
+        if len(selected_items) == 1 and selected_items[0] is item:
+            return
+        try:
             self.graphics_scene.clearSelection()
             item.setSelected(True)
-            QTimer.singleShot(0, lambda it=item: self._safe_center_on(it))
+        except Exception:
+            pass
+
+    def is_index_actively_pressed(self, index: int) -> bool:
+        try:
+            return self._active_press_index == int(index)
+        except Exception:
+            return False
+
+    def _on_scene_selection_changed(self):
+        try:
+            selected_items = set(self.graphics_scene.selectedItems())
+        except Exception:
+            selected_items = set()
+        has_selection = bool(selected_items)
+        self._set_selection_pulse_active(has_selection)
+        self._apply_selection_layering(selected_items)
+        dirty_items = set(self._last_selected_items)
+        dirty_items.update(selected_items)
+        self._update_selected_item_visuals(dirty_items)
+        self._last_selected_items = selected_items
+
+    def _set_selection_pulse_active(self, active: bool):
+        if active:
+            if not self._selection_pulse_timer.isActive():
+                self._selection_pulse_phase = 0.0
+                self._selection_pulse_alpha = SELECTION_PULSE_MAX_ALPHA
+                self._selection_pulse_width_scale = 1.0
+                self._selection_pulse_timer.start()
+            return
+        if self._selection_pulse_timer.isActive():
+            self._selection_pulse_timer.stop()
+        self._selection_pulse_phase = 0.0
+        self._selection_pulse_alpha = SELECTION_PULSE_MAX_ALPHA
+        self._selection_pulse_width_scale = 1.0
+
+    def _on_selection_pulse_tick(self):
+        try:
+            self._selection_pulse_phase = (
+                self._selection_pulse_phase + SELECTION_PULSE_STEP_RAD
+            ) % (2.0 * math.pi)
+            pulse_wave = (math.sin(self._selection_pulse_phase) + 1.0) * 0.5
+            self._selection_pulse_alpha = (
+                SELECTION_PULSE_MIN_ALPHA
+                + (SELECTION_PULSE_MAX_ALPHA - SELECTION_PULSE_MIN_ALPHA) * pulse_wave
+            )
+            self._selection_pulse_width_scale = (
+                SELECTION_PULSE_WIDTH_SCALE_MIN
+                + (SELECTION_PULSE_WIDTH_SCALE_MAX - SELECTION_PULSE_WIDTH_SCALE_MIN) * pulse_wave
+            )
         except Exception:
             return
+        self._update_selected_item_visuals()
+
+    def _apply_selection_layering(self, selected_items: Optional[set[QGraphicsItem]] = None):
+        if selected_items is None:
+            try:
+                selected_items = set(self.graphics_scene.selectedItems())
+            except Exception:
+                selected_items = set()
+        for kind, item, handle in self._items:
+            try:
+                base_z = 12 if kind == "event_trigger" else 10
+                item.setZValue(24 if item in selected_items else base_z)
+            except Exception:
+                continue
+            if handle:
+                handle_z = 25 if item in selected_items else 12
+                for sub in handle.scene_items():
+                    try:
+                        sub.setZValue(handle_z)
+                    except Exception:
+                        continue
+
+    def _update_selected_item_visuals(self, items: Optional[set[QGraphicsItem]] = None):
+        if items is None:
+            try:
+                items = set(self.graphics_scene.selectedItems())
+            except Exception:
+                return
+        for item in items:
+            try:
+                if item is None or item.scene() is None:
+                    continue
+                item.update()
+            except Exception:
+                continue
+
+    def get_selection_pulse_alpha(self) -> float:
+        try:
+            return float(self._selection_pulse_alpha)
+        except Exception:
+            return float(SELECTION_PULSE_MAX_ALPHA)
+
+    def get_selection_pulse_width_scale(self) -> float:
+        try:
+            return float(self._selection_pulse_width_scale)
+        except Exception:
+            return 1.0
 
     def _safe_center_on(self, item: QGraphicsItem):
         try:
@@ -375,6 +552,8 @@ class CanvasView(QGraphicsView):
 
     # ------------- Item build -------------
     def _clear_scene_items(self):
+        self._set_selection_pulse_active(False)
+        self._last_selected_items.clear()
         for _, item, handle in self._items:
             self.graphics_scene.removeItem(item)
             if handle:
@@ -514,6 +693,7 @@ class CanvasView(QGraphicsView):
             self._items.append((kind, item, rotation_handle))
             self._handoff_visualizers.append(handoff_visualizer)
         self._build_connecting_lines()
+        self._apply_selection_layering(set())
 
     # ------------- Geometry helpers -------------
     def _angle_for_translation_index(self, index: int) -> float:
@@ -616,6 +796,18 @@ class CanvasView(QGraphicsView):
     def _on_item_live_moved(self, index: int, x_m: float, y_m: float):
         if index < 0 or index >= len(self._items):
             return
+        if self._active_press_index == index:
+            try:
+                _, active_item, _ = self._items[index]
+                if self._press_start_scene_pos is None:
+                    self._press_moved = True
+                else:
+                    dx = float(active_item.pos().x() - self._press_start_scene_pos.x())
+                    dy = float(active_item.pos().y() - self._press_start_scene_pos.y())
+                    if (dx * dx + dy * dy) > float(self._press_move_epsilon_sq):
+                        self._press_moved = True
+            except Exception:
+                self._press_moved = True
         self._update_connecting_lines()
         try:
             kind, _, handle = self._items[index]
@@ -636,6 +828,16 @@ class CanvasView(QGraphicsView):
     def _on_item_live_rotated(self, index: int, angle_radians: float):
         if index < 0 or index >= len(self._items):
             return
+        if self._active_press_index == index:
+            try:
+                if self._press_start_angle_radians is None:
+                    self._press_rotated = True
+                elif abs(float(angle_radians) - float(self._press_start_angle_radians)) > float(
+                    self._press_rotation_epsilon_rad
+                ):
+                    self._press_rotated = True
+            except Exception:
+                self._press_rotated = True
         try:
             kind, item, handle = self._items[index]
             if kind in ("rotation", "waypoint"):
@@ -659,14 +861,14 @@ class CanvasView(QGraphicsView):
     # -------- Coordinate conversion --------
     def _scene_from_model(self, x_m: float, y_m: float) -> QPointF:
         """Convert model coordinates to scene coordinates.
-        
+
         For 2026 field, adds FIELD_OFFSET_M (0.5m) to account for image margin.
         """
         return QPointF(x_m + self._field_offset, FIELD_WIDTH_METERS - y_m - self._field_offset)
 
     def _model_from_scene(self, x_s: float, y_s: float) -> Tuple[float, float]:
         """Convert scene coordinates to model coordinates.
-        
+
         For 2026 field, subtracts FIELD_OFFSET_M (0.5m) to account for image margin.
         """
         return float(x_s - self._field_offset), float(FIELD_WIDTH_METERS - y_s - self._field_offset)
@@ -786,23 +988,47 @@ class CanvasView(QGraphicsView):
     def _on_item_pressed(self, index: int):
         if index < 0 or index >= len(self._items):
             return
+        self._ensure_pressed_item_selected(index)
+        self._active_press_index = int(index)
+        self._press_moved = False
+        self._press_rotated = False
+        self._press_start_scene_pos = None
+        self._press_start_angle_radians = None
+        try:
+            _, item, _ = self._items[index]
+            self._press_start_scene_pos = QPointF(item.pos())
+            angle = getattr(item, "_angle_radians", None)
+            if angle is not None:
+                self._press_start_angle_radians = float(angle)
+        except Exception:
+            pass
         kind, _, _ = self._items[index]
         if kind in ("translation", "waypoint"):
             self._anchor_drag_in_progress = True
             self._rotation_t_cache = self._compute_rotation_t_cache()
 
     def _on_item_released(self, index: int):
+        is_active_release = self._active_press_index == index
+        did_transform = bool(is_active_release and (self._press_moved or self._press_rotated))
         if self._anchor_drag_in_progress:
             try:
-                for i, (kind, item, _) in enumerate(self._items):
-                    if kind not in ("rotation", "event_trigger"):
-                        continue
-                    mx, my = self._model_from_scene(item.pos().x(), item.pos().y())
-                    self.elementMoved.emit(i, mx, my)
+                if did_transform:
+                    for i, (kind, item, _) in enumerate(self._items):
+                        if kind not in ("rotation", "event_trigger"):
+                            continue
+                        mx, my = self._model_from_scene(item.pos().x(), item.pos().y())
+                        self.elementMoved.emit(i, mx, my)
             finally:
                 self._anchor_drag_in_progress = False
                 self._rotation_t_cache = None
-        self.elementDragFinished.emit(index)
+        if did_transform:
+            self.elementDragFinished.emit(index)
+        if is_active_release:
+            self._active_press_index = None
+            self._press_moved = False
+            self._press_rotated = False
+            self._press_start_scene_pos = None
+            self._press_start_angle_radians = None
         self.request_simulation_rebuild()
 
     # -------- Simulation API (subset) --------
@@ -1124,6 +1350,11 @@ class CanvasView(QGraphicsView):
         try:
             # Use left-click to pan on empty/background (not on interactive items)
             if event.button() == Qt.LeftButton and self._should_start_pan(event.pos()):
+                self.clear_selection()
+                try:
+                    self.selectionCleared.emit()
+                except Exception:
+                    pass
                 self._is_panning = True
                 self._pan_start = event.pos()
                 self.viewport().setCursor(Qt.ClosedHandCursor)
