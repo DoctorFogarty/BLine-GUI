@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from models.path_model import Path as PathModel, TranslationTarget
@@ -28,6 +29,53 @@ def test_project_config_updates():
         cfg.get_default_optional_value("max_velocity_meters_per_sec")
         == cfg.default_max_velocity_meters_per_sec
     )
+
+
+def test_project_config_migrates_legacy_protrusions():
+    cfg = ProjectConfig.from_mapping(
+        {
+            "robot_length_meters": 0.7,
+            "robot_width_meters": 0.6,
+            "robot_protrusion_left_meters": 0.18,
+            "robot_protrusion_front_meters": 0.08,
+        }
+    )
+
+    assert cfg.protrusion_enabled is True
+    assert cfg.protrusion_side == "left"
+    assert cfg.protrusion_distance_meters == 0.18
+    assert cfg.protrusion_default_state == "shown"
+
+    structured = cfg.to_dict()
+    assert structured["settings_version"] == ProjectConfig.SETTINGS_VERSION
+    assert structured["gui"]["robot"]["length_meters"] == 0.7
+    assert structured["gui"]["protrusions"]["side"] == "left"
+    assert structured["gui"]["protrusions"]["distance_meters"] == 0.18
+
+
+def test_project_manager_migrates_legacy_config_file(tmp_path: Path):
+    pm = ProjectManager()
+    pm.settings = DummySettings()
+    pm.set_project_dir(str(tmp_path))
+
+    legacy = {
+        "robot_length_meters": 0.65,
+        "robot_width_meters": 0.55,
+        "robot_protrusion_back_meters": 0.12,
+        "default_max_velocity_meters_per_sec": 3.0,
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = pm.load_config()
+    assert loaded.protrusion_enabled is True
+    assert loaded.protrusion_side == "back"
+    assert loaded.protrusion_distance_meters == 0.12
+
+    migrated = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert migrated["settings_version"] == ProjectConfig.SETTINGS_VERSION
+    assert "gui" in migrated and "kinematic_constraints" in migrated
+    assert migrated["gui"]["protrusions"]["side"] == "back"
 
 
 def test_project_manager_saves_and_loads_paths(tmp_path: Path):

@@ -542,11 +542,8 @@ class MainWindow(WindowEventMixin, QMainWindow):
         # Begin a config-edit session: capture original for undo on first live change
         self._config_edit_old_config = copy.deepcopy(old_config)
         self._config_undo_recorded = False
-        cfg_obj = self.project_manager.load_config()
-        if hasattr(cfg_obj, "to_dict"):
-            cfg = cfg_obj.to_dict()
-        else:
-            cfg = self.project_manager.config_as_dict()
+        self.project_manager.load_config()
+        cfg = self.project_manager.config_as_dict()
         dlg = ConfigDialog(self, cfg, on_change=self._on_config_live_change)
         result = dlg.exec()
         if result == QDialog.Accepted:
@@ -580,13 +577,22 @@ class MainWindow(WindowEventMixin, QMainWindow):
         self._config_edit_old_config = None
         self._config_undo_recorded = False
 
-    def _on_config_live_change(self, key: str, value: float):
+    def _on_config_live_change(self, key: str, value):
         # Persist to config immediately, but do NOT create per-item undo entries
         self.project_manager.save_config({key: value})
         # Track that we had at least one live change during this session
         self._config_undo_recorded = True
 
-        if key in ("robot_length_meters", "robot_width_meters"):
+        if key in (
+            "robot_length_meters",
+            "robot_width_meters",
+            "protrusion_enabled",
+            "protrusion_distance_meters",
+            "protrusion_side",
+            "protrusion_default_state",
+            "protrusion_show_on_event_keys",
+            "protrusion_hide_on_event_keys",
+        ):
             self._apply_robot_dims_from_config(self.project_manager.config)
         # Config changes affect simulation constraints/gains; rebuild sim
         self.canvas.request_simulation_rebuild()
@@ -606,10 +612,10 @@ class MainWindow(WindowEventMixin, QMainWindow):
         labels = {
             "robot_length_meters": "Robot Length",
             "robot_width_meters": "Robot Width",
-            "robot_protrusion_front_meters": "Robot Protrusion Front",
-            "robot_protrusion_back_meters": "Robot Protrusion Back",
-            "robot_protrusion_left_meters": "Robot Protrusion Left",
-            "robot_protrusion_right_meters": "Robot Protrusion Right",
+            "protrusion_enabled": "Protrusions Enabled",
+            "protrusion_distance_meters": "Protrusion Distance",
+            "protrusion_side": "Protrusion Side",
+            "protrusion_default_state": "Default Protrusion State",
             "max_velocity_meters_per_sec": "Default Max Velocity",
             "max_acceleration_meters_per_sec2": "Default Max Accel",
             "intermediate_handoff_radius_meters": "Default Handoff Radius",
