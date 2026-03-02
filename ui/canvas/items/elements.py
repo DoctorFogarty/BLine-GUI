@@ -170,7 +170,7 @@ class RectElementItem(QGraphicsRectItem):
         self._protrusion_shown: bool = False
         self._protrusion_side: str = "none"
         self._protrusion_distance_m: float = 0.0
-        self._protrusion_line: Optional[QGraphicsLineItem] = None
+        self._protrusion_lines: List[QGraphicsLineItem] = []
         pen_width_m = OUTLINE_THICK_M if (outline_color and not dashed_outline) else OUTLINE_THIN_M
         inset = (pen_width_m if outline_color else 0.0) * 0.5
         x_min = -(rw / 2.0)
@@ -260,45 +260,59 @@ class RectElementItem(QGraphicsRectItem):
         )
 
         if not should_draw:
-            if self._protrusion_line is not None:
-                self._protrusion_line.setVisible(False)
+            for line in self._protrusion_lines:
+                line.setVisible(False)
             return
 
-        if self._protrusion_line is None:
-            self._protrusion_line = QGraphicsLineItem(self)
-            self._protrusion_line.setZValue(self.zValue() + 0.7)
+        while len(self._protrusion_lines) < 3:
+            line = QGraphicsLineItem(self)
+            line.setZValue(self.zValue() + 0.7)
+            self._protrusion_lines.append(line)
 
         pen = QPen(self._outline_color, OUTLINE_THIN_M)
         pen = _apply_rotation_dash_style(pen)
-        self._protrusion_line.setPen(pen)
+        for line in self._protrusion_lines:
+            line.setPen(pen)
 
         r = self.rect()
         rect_pen_width = float(self.pen().widthF()) if self.pen() is not None else OUTLINE_THIN_M
         protrusion_pen_width = float(pen.widthF())
-        # Keep measurement accurate to pixel perimeter edges:
-        # edge-to-edge offset equals the user-configured protrusion distance.
-        edge_offset = self._protrusion_distance_m + 0.5 * (rect_pen_width + protrusion_pen_width)
 
         left = float(r.left())
         right = float(r.right())
         top = float(r.top())
         bottom = float(r.bottom())
+        outer_left = left - (rect_pen_width * 0.5)
+        outer_right = right + (rect_pen_width * 0.5)
+        outer_top = top - (rect_pen_width * 0.5)
+        outer_bottom = bottom + (rect_pen_width * 0.5)
+        line_half = protrusion_pen_width * 0.5
+        edge_offset = self._protrusion_distance_m
 
         side = self._protrusion_side
         if side == "front":
-            x = right + edge_offset
-            self._protrusion_line.setLine(x, top, x, bottom)
+            x = outer_right + edge_offset + line_half
+            self._protrusion_lines[0].setLine(x, outer_top, x, outer_bottom)
+            self._protrusion_lines[1].setLine(outer_right, outer_top, x, outer_top)
+            self._protrusion_lines[2].setLine(outer_right, outer_bottom, x, outer_bottom)
         elif side == "back":
-            x = left - edge_offset
-            self._protrusion_line.setLine(x, top, x, bottom)
+            x = outer_left - edge_offset - line_half
+            self._protrusion_lines[0].setLine(x, outer_top, x, outer_bottom)
+            self._protrusion_lines[1].setLine(outer_left, outer_top, x, outer_top)
+            self._protrusion_lines[2].setLine(outer_left, outer_bottom, x, outer_bottom)
         elif side == "left":
-            y = bottom + edge_offset
-            self._protrusion_line.setLine(left, y, right, y)
+            y = outer_bottom + edge_offset + line_half
+            self._protrusion_lines[0].setLine(outer_left, y, outer_right, y)
+            self._protrusion_lines[1].setLine(outer_left, outer_bottom, outer_left, y)
+            self._protrusion_lines[2].setLine(outer_right, outer_bottom, outer_right, y)
         else:  # right
-            y = top - edge_offset
-            self._protrusion_line.setLine(left, y, right, y)
+            y = outer_top - edge_offset - line_half
+            self._protrusion_lines[0].setLine(outer_left, y, outer_right, y)
+            self._protrusion_lines[1].setLine(outer_left, outer_top, outer_left, y)
+            self._protrusion_lines[2].setLine(outer_right, outer_top, outer_right, y)
 
-        self._protrusion_line.setVisible(True)
+        for line in self._protrusion_lines:
+            line.setVisible(True)
 
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         if change == QGraphicsItem.ItemPositionChange:
