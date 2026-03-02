@@ -15,6 +15,10 @@ from utils.project_io import create_example_paths, deserialize_path, serialize_p
 class ProjectConfig:
     robot_length_meters: float = 0.5
     robot_width_meters: float = 0.5
+    robot_protrusion_front_meters: float = 0.0
+    robot_protrusion_back_meters: float = 0.0
+    robot_protrusion_left_meters: float = 0.0
+    robot_protrusion_right_meters: float = 0.0
     default_max_velocity_meters_per_sec: float = 4.5
     default_max_acceleration_meters_per_sec2: float = 7.0
     default_intermediate_handoff_radius_meters: float = 0.2

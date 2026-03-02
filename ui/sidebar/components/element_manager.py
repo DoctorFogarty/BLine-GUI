@@ -101,6 +101,12 @@ class ElementManager(QObject):
                     cfg = dict(getattr(self.project_manager, "config", {}) or {})
             length_m = float(cfg.get("robot_length_meters", length_m))
             width_m = float(cfg.get("robot_width_meters", width_m))
+            length_m += max(0.0, float(cfg.get("robot_protrusion_front_meters", 0.0))) + max(
+                0.0, float(cfg.get("robot_protrusion_back_meters", 0.0))
+            )
+            width_m += max(0.0, float(cfg.get("robot_protrusion_left_meters", 0.0))) + max(
+                0.0, float(cfg.get("robot_protrusion_right_meters", 0.0))
+            )
         except Exception:
             pass
         return length_m, width_m

@@ -170,6 +170,34 @@ class ConfigDialog(QDialog):
             (0.05, 5.0),
             0.01,
         )
+        add_spin(
+            "robot_protrusion_front_meters",
+            "Robot Protrusion Front (m)",
+            cfg.get("robot_protrusion_front_meters", 0.0) or 0.0,
+            (0.0, 2.0),
+            0.01,
+        )
+        add_spin(
+            "robot_protrusion_back_meters",
+            "Robot Protrusion Back (m)",
+            cfg.get("robot_protrusion_back_meters", 0.0) or 0.0,
+            (0.0, 2.0),
+            0.01,
+        )
+        add_spin(
+            "robot_protrusion_left_meters",
+            "Robot Protrusion Left (m)",
+            cfg.get("robot_protrusion_left_meters", 0.0) or 0.0,
+            (0.0, 2.0),
+            0.01,
+        )
+        add_spin(
+            "robot_protrusion_right_meters",
+            "Robot Protrusion Right (m)",
+            cfg.get("robot_protrusion_right_meters", 0.0) or 0.0,
+            (0.0, 2.0),
+            0.01,
+        )
 
         # Optional defaults
         add_spin(
