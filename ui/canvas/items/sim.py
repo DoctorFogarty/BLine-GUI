@@ -20,10 +20,6 @@ class RobotSimItem(QGraphicsRectItem):
         self.canvas_view = canvas_view
         robot_width_m = 0.5
         robot_length_m = 0.5
-        protrusion_front_m = 0.0
-        protrusion_back_m = 0.0
-        protrusion_left_m = 0.0
-        protrusion_right_m = 0.0
         try:
             if hasattr(canvas_view, "_project_manager") and canvas_view._project_manager:
                 if hasattr(canvas_view._project_manager, "config_as_dict"):
@@ -32,16 +28,12 @@ class RobotSimItem(QGraphicsRectItem):
                     cfg = dict(getattr(canvas_view._project_manager, "config", {}) or {})
                 robot_width_m = float(cfg.get("robot_width_meters", robot_width_m))
                 robot_length_m = float(cfg.get("robot_length_meters", robot_length_m))
-                protrusion_front_m = max(0.0, float(cfg.get("robot_protrusion_front_meters", protrusion_front_m)))
-                protrusion_back_m = max(0.0, float(cfg.get("robot_protrusion_back_meters", protrusion_back_m)))
-                protrusion_left_m = max(0.0, float(cfg.get("robot_protrusion_left_meters", protrusion_left_m)))
-                protrusion_right_m = max(0.0, float(cfg.get("robot_protrusion_right_meters", protrusion_right_m)))
         except Exception:
             pass
-        x_min = -(robot_length_m / 2.0) - protrusion_back_m
-        x_max = (robot_length_m / 2.0) + protrusion_front_m
-        y_min = -(robot_width_m / 2.0) - protrusion_right_m
-        y_max = (robot_width_m / 2.0) + protrusion_left_m
+        x_min = -(robot_length_m / 2.0)
+        x_max = (robot_length_m / 2.0)
+        y_min = -(robot_width_m / 2.0)
+        y_max = (robot_width_m / 2.0)
         self.setRect(x_min, y_min, x_max - x_min, y_max - y_min)
         self.setBrush(QBrush(QColor(255, 165, 0, 120)))
         self.setPen(QPen(QColor("#000000"), 0.03))
@@ -56,15 +48,11 @@ class RobotSimItem(QGraphicsRectItem):
         self,
         length_m: float,
         width_m: float,
-        protrusion_front_m: float = 0.0,
-        protrusion_back_m: float = 0.0,
-        protrusion_left_m: float = 0.0,
-        protrusion_right_m: float = 0.0,
     ):
-        x_min = -(length_m / 2.0) - max(0.0, protrusion_back_m)
-        x_max = (length_m / 2.0) + max(0.0, protrusion_front_m)
-        y_min = -(width_m / 2.0) - max(0.0, protrusion_right_m)
-        y_max = (width_m / 2.0) + max(0.0, protrusion_left_m)
+        x_min = -(length_m / 2.0)
+        x_max = (length_m / 2.0)
+        y_min = -(width_m / 2.0)
+        y_max = (width_m / 2.0)
         self.setRect(x_min, y_min, x_max - x_min, y_max - y_min)
         self._build_triangle(float(self.rect().width()), float(self.rect().height()))
 
