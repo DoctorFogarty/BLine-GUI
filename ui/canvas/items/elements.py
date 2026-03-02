@@ -146,9 +146,17 @@ class RectElementItem(QGraphicsRectItem):
         self.index_in_model = index_in_model
         rw = getattr(self.canvas_view, "robot_length_m", 0.60)
         rh = getattr(self.canvas_view, "robot_width_m", 0.60)
+        protrusion_front = max(0.0, float(getattr(self.canvas_view, "robot_protrusion_front_m", 0.0)))
+        protrusion_back = max(0.0, float(getattr(self.canvas_view, "robot_protrusion_back_m", 0.0)))
+        protrusion_left = max(0.0, float(getattr(self.canvas_view, "robot_protrusion_left_m", 0.0)))
+        protrusion_right = max(0.0, float(getattr(self.canvas_view, "robot_protrusion_right_m", 0.0)))
         pen_width_m = OUTLINE_THICK_M if (outline_color and not dashed_outline) else OUTLINE_THIN_M
         inset = (pen_width_m if outline_color else 0.0) * 0.5
-        self.setRect(-(rw / 2.0) + inset, -(rh / 2.0) + inset, rw - inset * 2, rh - inset * 2)
+        x_min = -(rw / 2.0) - protrusion_back
+        x_max = (rw / 2.0) + protrusion_front
+        y_min = -(rh / 2.0) - protrusion_right
+        y_max = (rh / 2.0) + protrusion_left
+        self.setRect(x_min + inset, y_min + inset, (x_max - x_min) - inset * 2, (y_max - y_min) - inset * 2)
         self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
         pen = QPen(outline_color or QColor("#000"), pen_width_m if outline_color else 0.0)
         if dashed_outline:
@@ -192,8 +200,9 @@ class RectElementItem(QGraphicsRectItem):
         self._angle_radians: float = 0.0
 
     def _build_triangle(self, color: QColor):
-        rw = getattr(self.canvas_view, "robot_length_m", 0.60)
-        rh = getattr(self.canvas_view, "robot_width_m", 0.60)
+        r = self.rect()
+        rw = float(r.width())
+        rh = float(r.height())
         base_size = min(rw, rh) * TRIANGLE_REL_SIZE
         half_base = base_size * 0.5
         height = base_size

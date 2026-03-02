@@ -606,6 +606,10 @@ class MainWindow(WindowEventMixin, QMainWindow):
         labels = {
             "robot_length_meters": "Robot Length",
             "robot_width_meters": "Robot Width",
+            "robot_protrusion_front_meters": "Robot Protrusion Front",
+            "robot_protrusion_back_meters": "Robot Protrusion Back",
+            "robot_protrusion_left_meters": "Robot Protrusion Left",
+            "robot_protrusion_right_meters": "Robot Protrusion Right",
             "max_velocity_meters_per_sec": "Default Max Velocity",
             "max_acceleration_meters_per_sec2": "Default Max Accel",
             "intermediate_handoff_radius_meters": "Default Handoff Radius",

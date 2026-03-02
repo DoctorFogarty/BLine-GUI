@@ -105,6 +105,10 @@ class CanvasView(QGraphicsView):
         self._pan_start: Optional[QPoint] = None
         self.robot_length_m = ELEMENT_RECT_WIDTH_M
         self.robot_width_m = ELEMENT_RECT_HEIGHT_M
+        self.robot_protrusion_front_m = 0.0
+        self.robot_protrusion_back_m = 0.0
+        self.robot_protrusion_left_m = 0.0
+        self.robot_protrusion_right_m = 0.0
         self._field_offset: float = FIELD_OFFSET_M  # 0.5m for 2026
         self.graphics_scene = QGraphicsScene(self)
         self.setScene(self.graphics_scene)
@@ -189,6 +193,16 @@ class CanvasView(QGraphicsView):
         try:
             self.robot_length_m = float(length_m)
             self.robot_width_m = float(width_m)
+            cfg = {}
+            if hasattr(self, "_project_manager") and self._project_manager:
+                if hasattr(self._project_manager, "config_as_dict"):
+                    cfg = self._project_manager.config_as_dict()
+                else:
+                    cfg = dict(getattr(self._project_manager, "config", {}) or {})
+            self.robot_protrusion_front_m = max(0.0, float(cfg.get("robot_protrusion_front_meters", 0.0)))
+            self.robot_protrusion_back_m = max(0.0, float(cfg.get("robot_protrusion_back_meters", 0.0)))
+            self.robot_protrusion_left_m = max(0.0, float(cfg.get("robot_protrusion_left_meters", 0.0)))
+            self.robot_protrusion_right_m = max(0.0, float(cfg.get("robot_protrusion_right_meters", 0.0)))
         except Exception:
             return
         self._rebuild_items()
@@ -197,7 +211,7 @@ class CanvasView(QGraphicsView):
         try:
             self._ensure_sim_robot_item()
             if self._sim_robot_item:
-                self._sim_robot_item.set_dimensions(self.robot_length_m, self.robot_width_m)
+                self._sim_robot_item.set_dimensions(self.robot_length_m, self.robot_width_m, self.robot_protrusion_front_m, self.robot_protrusion_back_m, self.robot_protrusion_left_m, self.robot_protrusion_right_m)
         except Exception:
             pass
 
@@ -671,8 +685,22 @@ class CanvasView(QGraphicsView):
         """
         return float(x_s - self._field_offset), float(FIELD_WIDTH_METERS - y_s - self._field_offset)
 
+    def _robot_half_extents(self) -> Tuple[float, float]:
+        half_x = max(0.0, self.robot_length_m * 0.5 + self.robot_protrusion_front_m)
+        half_x_back = max(0.0, self.robot_length_m * 0.5 + self.robot_protrusion_back_m)
+        half_y = max(0.0, self.robot_width_m * 0.5 + self.robot_protrusion_left_m)
+        half_y_right = max(0.0, self.robot_width_m * 0.5 + self.robot_protrusion_right_m)
+        return max(half_x, half_x_back), max(half_y, half_y_right)
+
     def _clamp_scene_coords(self, x_s: float, y_s: float) -> Tuple[float, float]:
         return max(0.0, min(x_s, FIELD_LENGTH_METERS)), max(0.0, min(y_s, FIELD_WIDTH_METERS))
+
+    def _clamp_scene_coords_with_robot_perimeter(self, x_s: float, y_s: float) -> Tuple[float, float]:
+        hx, hy = self._robot_half_extents()
+        return (
+            max(hx, min(x_s, FIELD_LENGTH_METERS - hx)),
+            max(hy, min(y_s, FIELD_WIDTH_METERS - hy)),
+        )
 
     def _constrain_scene_coords_for_index(
         self, index: int, x_s: float, y_s: float
@@ -685,7 +713,7 @@ class CanvasView(QGraphicsView):
         except Exception:
             return x_s, y_s
         if kind not in ("rotation", "event_trigger"):
-            return x_s, y_s
+            return self._clamp_scene_coords_with_robot_perimeter(x_s, y_s)
         prev_pos, next_pos = self._find_neighbor_item_positions(index)
         if prev_pos is None or next_pos is None:
             return x_s, y_s
@@ -700,7 +728,7 @@ class CanvasView(QGraphicsView):
         t = max(0.0, min(1.0, t))
         proj_x = ax + t * dx
         proj_y = ay + t * dy
-        return self._clamp_scene_coords(proj_x, proj_y)
+        return self._clamp_scene_coords_with_robot_perimeter(proj_x, proj_y)
 
     def _find_neighbor_item_positions(
         self, index: int
@@ -821,7 +849,7 @@ class CanvasView(QGraphicsView):
             self._sim_robot_item = item
             item.setVisible(False)
             try:
-                item.set_dimensions(self.robot_length_m, self.robot_width_m)
+                item.set_dimensions(self.robot_length_m, self.robot_width_m, self.robot_protrusion_front_m, self.robot_protrusion_back_m, self.robot_protrusion_left_m, self.robot_protrusion_right_m)
             except Exception:
                 pass
         except Exception:
