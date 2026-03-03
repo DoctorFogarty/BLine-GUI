@@ -47,7 +47,7 @@ def test_project_config_migrates_legacy_protrusions():
     assert cfg.protrusion_default_state == "shown"
 
     structured = cfg.to_dict()
-    assert structured["settings_version"] == ProjectConfig.SETTINGS_VERSION
+    assert "settings_version" not in structured
     assert structured["gui"]["robot"]["length_meters"] == 0.7
     assert structured["gui"]["protrusions"]["side"] == "left"
     assert structured["gui"]["protrusions"]["distance_meters"] == 0.18
@@ -73,7 +73,7 @@ def test_project_manager_migrates_legacy_config_file(tmp_path: Path):
     assert loaded.protrusion_distance_meters == 0.12
 
     migrated = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert migrated["settings_version"] == ProjectConfig.SETTINGS_VERSION
+    assert "settings_version" not in migrated
     assert "gui" in migrated and "kinematic_constraints" in migrated
     assert migrated["gui"]["protrusions"]["side"] == "back"
 

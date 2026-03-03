@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from PySide6.QtCore import QSettings
 
@@ -13,8 +13,6 @@ from utils.project_io import create_example_paths, deserialize_path, serialize_p
 
 @dataclass
 class ProjectConfig:
-    SETTINGS_VERSION: ClassVar[int] = 2
-
     robot_length_meters: float = 0.5
     robot_width_meters: float = 0.5
     protrusion_enabled: bool = False
@@ -134,12 +132,6 @@ class ProjectConfig:
     def needs_migration(cls, data: Mapping[str, Any] | None) -> bool:
         if not isinstance(data, Mapping):
             return False
-        try:
-            version = int(data.get("settings_version", 0))
-        except Exception:
-            version = 0
-        if version != cls.SETTINGS_VERSION:
-            return True
         gui = data.get("gui")
         if not isinstance(gui, Mapping):
             return True
@@ -291,7 +283,6 @@ class ProjectConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "settings_version": int(self.SETTINGS_VERSION),
             "gui": {
                 "robot": {
                     "length_meters": float(self.robot_length_meters),
@@ -348,7 +339,6 @@ class ProjectConfig:
         legacy_right = distance if enabled and side == "right" else 0.0
 
         return {
-            "settings_version": int(self.SETTINGS_VERSION),
             "robot_length_meters": float(self.robot_length_meters),
             "robot_width_meters": float(self.robot_width_meters),
             "protrusion_enabled": enabled,
