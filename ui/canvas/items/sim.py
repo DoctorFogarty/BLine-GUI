@@ -77,9 +77,11 @@ class RobotSimItem(QGraphicsRectItem):
             elif side == "back":
                 x_min -= distance
             elif side == "left":
-                y_max += distance
-            elif side == "right":
+                # Robot-left maps to negative local Y for scene-rendered robot shapes.
                 y_min -= distance
+            elif side == "right":
+                # Robot-right maps to positive local Y.
+                y_max += distance
         self.setRect(x_min, y_min, x_max - x_min, y_max - y_min)
         self._build_triangle(float(self.rect().width()), float(self.rect().height()))
 

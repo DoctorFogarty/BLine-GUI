@@ -305,15 +305,17 @@ class RectElementItem(QGraphicsRectItem):
             self._protrusion_lines[1].setLine(outer_left, top_y, x, top_y)
             self._protrusion_lines[2].setLine(outer_left, bottom_y, x, bottom_y)
         elif side == "left":
-            y = outer_bottom + edge_offset + line_half
-            self._protrusion_lines[0].setLine(left_x, y, right_x, y)
-            self._protrusion_lines[1].setLine(left_x, outer_bottom, left_x, y)
-            self._protrusion_lines[2].setLine(right_x, outer_bottom, right_x, y)
-        else:  # right
+            # Robot-left is negative local Y after model->scene conversion.
             y = outer_top - edge_offset - line_half
             self._protrusion_lines[0].setLine(left_x, y, right_x, y)
             self._protrusion_lines[1].setLine(left_x, outer_top, left_x, y)
             self._protrusion_lines[2].setLine(right_x, outer_top, right_x, y)
+        else:  # right
+            # Robot-right is positive local Y after model->scene conversion.
+            y = outer_bottom + edge_offset + line_half
+            self._protrusion_lines[0].setLine(left_x, y, right_x, y)
+            self._protrusion_lines[1].setLine(left_x, outer_bottom, left_x, y)
+            self._protrusion_lines[2].setLine(right_x, outer_bottom, right_x, y)
 
         for line in self._protrusion_lines:
             line.setVisible(True)
