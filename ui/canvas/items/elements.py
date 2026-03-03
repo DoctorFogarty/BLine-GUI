@@ -288,28 +288,32 @@ class RectElementItem(QGraphicsRectItem):
         outer_bottom = bottom + (rect_pen_width * 0.5)
         line_half = protrusion_pen_width * 0.5
         edge_offset = self._protrusion_distance_m
+        top_y = outer_top + line_half
+        bottom_y = outer_bottom - line_half
+        left_x = outer_left + line_half
+        right_x = outer_right - line_half
 
         side = self._protrusion_side
         if side == "front":
             x = outer_right + edge_offset + line_half
-            self._protrusion_lines[0].setLine(x, outer_top, x, outer_bottom)
-            self._protrusion_lines[1].setLine(outer_right, outer_top, x, outer_top)
-            self._protrusion_lines[2].setLine(outer_right, outer_bottom, x, outer_bottom)
+            self._protrusion_lines[0].setLine(x, top_y, x, bottom_y)
+            self._protrusion_lines[1].setLine(outer_right, top_y, x, top_y)
+            self._protrusion_lines[2].setLine(outer_right, bottom_y, x, bottom_y)
         elif side == "back":
             x = outer_left - edge_offset - line_half
-            self._protrusion_lines[0].setLine(x, outer_top, x, outer_bottom)
-            self._protrusion_lines[1].setLine(outer_left, outer_top, x, outer_top)
-            self._protrusion_lines[2].setLine(outer_left, outer_bottom, x, outer_bottom)
+            self._protrusion_lines[0].setLine(x, top_y, x, bottom_y)
+            self._protrusion_lines[1].setLine(outer_left, top_y, x, top_y)
+            self._protrusion_lines[2].setLine(outer_left, bottom_y, x, bottom_y)
         elif side == "left":
             y = outer_bottom + edge_offset + line_half
-            self._protrusion_lines[0].setLine(outer_left, y, outer_right, y)
-            self._protrusion_lines[1].setLine(outer_left, outer_bottom, outer_left, y)
-            self._protrusion_lines[2].setLine(outer_right, outer_bottom, outer_right, y)
+            self._protrusion_lines[0].setLine(left_x, y, right_x, y)
+            self._protrusion_lines[1].setLine(left_x, outer_bottom, left_x, y)
+            self._protrusion_lines[2].setLine(right_x, outer_bottom, right_x, y)
         else:  # right
             y = outer_top - edge_offset - line_half
-            self._protrusion_lines[0].setLine(outer_left, y, outer_right, y)
-            self._protrusion_lines[1].setLine(outer_left, outer_top, outer_left, y)
-            self._protrusion_lines[2].setLine(outer_right, outer_top, outer_right, y)
+            self._protrusion_lines[0].setLine(left_x, y, right_x, y)
+            self._protrusion_lines[1].setLine(left_x, outer_top, left_x, y)
+            self._protrusion_lines[2].setLine(right_x, outer_top, right_x, y)
 
         for line in self._protrusion_lines:
             line.setVisible(True)
