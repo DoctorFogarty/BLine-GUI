@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from PySide6.QtCore import QSettings
@@ -15,6 +15,12 @@ from utils.project_io import create_example_paths, deserialize_path, serialize_p
 class ProjectConfig:
     robot_length_meters: float = 0.5
     robot_width_meters: float = 0.5
+    protrusion_enabled: bool = False
+    protrusion_distance_meters: float = 0.0
+    protrusion_side: str = "none"
+    protrusion_default_state: str = ""
+    protrusion_show_on_event_keys: List[str] = field(default_factory=list)
+    protrusion_hide_on_event_keys: List[str] = field(default_factory=list)
     default_max_velocity_meters_per_sec: float = 4.5
     default_max_acceleration_meters_per_sec2: float = 7.0
     default_intermediate_handoff_radius_meters: float = 0.2
@@ -30,21 +36,342 @@ class ProjectConfig:
             cfg.update_from_mapping(data)
         return cfg
 
-    def update_from_mapping(self, data: Mapping[str, Any]) -> None:
-        for field in fields(self):
-            if field.name not in data:
-                continue
-            value = data[field.name]
-            if value is None:
-                continue
-            try:
-                setattr(self, field.name, float(value))
-            except (TypeError, ValueError):
-                continue
+    @staticmethod
+    def _lookup_path(data: Mapping[str, Any], path: Tuple[str, ...]) -> Tuple[bool, Any]:
+        current: Any = data
+        for key in path:
+            if not isinstance(current, Mapping) or key not in current:
+                return False, None
+            current = current.get(key)
+        return True, current
 
-    def to_dict(self) -> Dict[str, float]:
-        raw = asdict(self)
-        return {k: float(v) for k, v in raw.items()}
+    @classmethod
+    def _lookup_any(
+        cls, data: Mapping[str, Any], paths: List[Tuple[str, ...]]
+    ) -> Tuple[bool, Any]:
+        for path in paths:
+            found, value = cls._lookup_path(data, path)
+            if found:
+                return True, value
+        return False, None
+
+    @staticmethod
+    def _coerce_float(value: Any, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+
+    @staticmethod
+    def _coerce_bool(value: Any, fallback: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("1", "true", "yes", "on", "enabled"):
+                return True
+            if lowered in ("0", "false", "no", "off", "disabled"):
+                return False
+        return bool(fallback)
+
+    @staticmethod
+    def _normalize_protrusion_side(value: Any, fallback: str = "none") -> str:
+        valid = {"none", "left", "right", "front", "back"}
+        text = str(value).strip().lower()
+        return text if text in valid else fallback
+
+    @staticmethod
+    def _normalize_protrusion_state(value: Any, fallback: str = "") -> str:
+        text = str(value).strip().lower()
+        if text in ("shown", "show", "visible", "on", "true", "1"):
+            return "shown"
+        if text in ("hidden", "hide", "invisible", "off", "false", "0"):
+            return "hidden"
+        if text in ("", "none"):
+            return ""
+        return fallback
+
+    @staticmethod
+    def _normalize_key_list(value: Any) -> List[str]:
+        values: List[str] = []
+        if value is None:
+            return values
+        if isinstance(value, str):
+            raw_items = value.replace("\n", ",").split(",")
+        elif isinstance(value, (list, tuple, set)):
+            raw_items = [str(v) for v in value]
+        else:
+            raw_items = [str(value)]
+
+        seen: set[str] = set()
+        for raw in raw_items:
+            key = str(raw).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            values.append(key)
+        return values
+
+    @classmethod
+    def _legacy_protrusion_conversion(cls, data: Mapping[str, Any]) -> Tuple[bool, float, str]:
+        legacy_values = {
+            "front": max(0.0, cls._coerce_float(data.get("robot_protrusion_front_meters"), 0.0)),
+            "back": max(0.0, cls._coerce_float(data.get("robot_protrusion_back_meters"), 0.0)),
+            "left": max(0.0, cls._coerce_float(data.get("robot_protrusion_left_meters"), 0.0)),
+            "right": max(0.0, cls._coerce_float(data.get("robot_protrusion_right_meters"), 0.0)),
+        }
+        if not any(v > 0.0 for v in legacy_values.values()):
+            return False, 0.0, "none"
+        priority = ["front", "back", "left", "right"]
+        best_side = max(priority, key=lambda k: (legacy_values[k], -priority.index(k)))
+        return True, float(legacy_values[best_side]), best_side
+
+    @classmethod
+    def needs_migration(cls, data: Mapping[str, Any] | None) -> bool:
+        if not isinstance(data, Mapping):
+            return False
+        gui = data.get("gui")
+        if not isinstance(gui, Mapping):
+            return True
+        if not isinstance(gui.get("robot"), Mapping):
+            return True
+        if not isinstance(gui.get("protrusions"), Mapping):
+            return True
+        if not isinstance(data.get("kinematic_constraints"), Mapping):
+            return True
+        legacy_keys = (
+            "robot_protrusion_front_meters",
+            "robot_protrusion_back_meters",
+            "robot_protrusion_left_meters",
+            "robot_protrusion_right_meters",
+        )
+        return any(k in data for k in legacy_keys)
+
+    def update_from_mapping(self, data: Mapping[str, Any]) -> None:
+        # GUI: robot dimensions
+        found, value = self._lookup_any(
+            data,
+            [("robot_length_meters",), ("gui", "robot", "length_meters")],
+        )
+        if found:
+            self.robot_length_meters = max(0.0, self._coerce_float(value, self.robot_length_meters))
+
+        found, value = self._lookup_any(
+            data,
+            [("robot_width_meters",), ("gui", "robot", "width_meters")],
+        )
+        if found:
+            self.robot_width_meters = max(0.0, self._coerce_float(value, self.robot_width_meters))
+
+        # GUI: protrusion options
+        enabled_found, enabled_value = self._lookup_any(
+            data,
+            [("protrusion_enabled",), ("gui", "protrusions", "enabled")],
+        )
+        if enabled_found:
+            self.protrusion_enabled = self._coerce_bool(enabled_value, self.protrusion_enabled)
+
+        distance_found, distance_value = self._lookup_any(
+            data,
+            [("protrusion_distance_meters",), ("gui", "protrusions", "distance_meters")],
+        )
+        if distance_found:
+            self.protrusion_distance_meters = max(
+                0.0, self._coerce_float(distance_value, self.protrusion_distance_meters)
+            )
+
+        side_found, side_value = self._lookup_any(
+            data,
+            [("protrusion_side",), ("gui", "protrusions", "side")],
+        )
+        if side_found:
+            self.protrusion_side = self._normalize_protrusion_side(
+                side_value, self.protrusion_side
+            )
+
+        default_state_found, default_state_value = self._lookup_any(
+            data,
+            [("protrusion_default_state",), ("gui", "protrusions", "default_state")],
+        )
+        if default_state_found:
+            self.protrusion_default_state = self._normalize_protrusion_state(
+                default_state_value, self.protrusion_default_state
+            )
+
+        # Optional event mapping object: { "keyA": "shown", "keyB": "hidden" }
+        state_map_found, state_map_value = self._lookup_any(
+            data,
+            [("gui", "protrusions", "event_state_overrides")],
+        )
+        if state_map_found and isinstance(state_map_value, Mapping):
+            show_keys: List[str] = []
+            hide_keys: List[str] = []
+            for raw_key, raw_state in state_map_value.items():
+                key = str(raw_key).strip()
+                if not key:
+                    continue
+                state = self._normalize_protrusion_state(raw_state, "")
+                if state == "shown":
+                    show_keys.append(key)
+                elif state == "hidden":
+                    hide_keys.append(key)
+            self.protrusion_show_on_event_keys = self._normalize_key_list(show_keys)
+            self.protrusion_hide_on_event_keys = self._normalize_key_list(hide_keys)
+
+        show_found, show_value = self._lookup_any(
+            data,
+            [("protrusion_show_on_event_keys",), ("gui", "protrusions", "show_on_event_keys")],
+        )
+        if show_found:
+            self.protrusion_show_on_event_keys = self._normalize_key_list(show_value)
+
+        hide_found, hide_value = self._lookup_any(
+            data,
+            [("protrusion_hide_on_event_keys",), ("gui", "protrusions", "hide_on_event_keys")],
+        )
+        if hide_found:
+            self.protrusion_hide_on_event_keys = self._normalize_key_list(hide_value)
+
+        # Legacy protrusion migration (flat directional values)
+        legacy_keys = (
+            "robot_protrusion_front_meters",
+            "robot_protrusion_back_meters",
+            "robot_protrusion_left_meters",
+            "robot_protrusion_right_meters",
+        )
+        legacy_present = any(key in data for key in legacy_keys)
+        new_protrusion_present = any(
+            (enabled_found, distance_found, side_found, default_state_found, show_found, hide_found)
+        ) or self._lookup_path(data, ("gui", "protrusions"))[0]
+        if legacy_present and not new_protrusion_present:
+            enabled, distance, side = self._legacy_protrusion_conversion(data)
+            self.protrusion_enabled = enabled
+            self.protrusion_distance_meters = distance
+            self.protrusion_side = side
+            self.protrusion_default_state = "shown" if enabled else ""
+            self.protrusion_show_on_event_keys = []
+            self.protrusion_hide_on_event_keys = []
+
+        # Kinematic constraints defaults
+        default_numeric_keys = (
+            "default_max_velocity_meters_per_sec",
+            "default_max_acceleration_meters_per_sec2",
+            "default_intermediate_handoff_radius_meters",
+            "default_max_velocity_deg_per_sec",
+            "default_max_acceleration_deg_per_sec2",
+            "default_end_translation_tolerance_meters",
+            "default_end_rotation_tolerance_deg",
+        )
+        for key in default_numeric_keys:
+            found, value = self._lookup_any(
+                data,
+                [(key,), ("kinematic_constraints", key)],
+            )
+            if not found:
+                continue
+            setattr(self, key, max(0.0, self._coerce_float(value, getattr(self, key))))
+
+        self.protrusion_side = self._normalize_protrusion_side(self.protrusion_side, "none")
+        if not bool(self.protrusion_enabled):
+            self.protrusion_default_state = ""
+        else:
+            self.protrusion_default_state = self._normalize_protrusion_state(
+                self.protrusion_default_state, ""
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "gui": {
+                "robot": {
+                    "length_meters": float(self.robot_length_meters),
+                    "width_meters": float(self.robot_width_meters),
+                },
+                "protrusions": {
+                    "enabled": bool(self.protrusion_enabled),
+                    "distance_meters": float(max(0.0, self.protrusion_distance_meters)),
+                    "side": self._normalize_protrusion_side(self.protrusion_side, "none"),
+                    "default_state": (
+                        self._normalize_protrusion_state(self.protrusion_default_state, "")
+                        if bool(self.protrusion_enabled)
+                        else ""
+                    ),
+                    "show_on_event_keys": self._normalize_key_list(
+                        self.protrusion_show_on_event_keys
+                    ),
+                    "hide_on_event_keys": self._normalize_key_list(
+                        self.protrusion_hide_on_event_keys
+                    ),
+                },
+            },
+            "kinematic_constraints": {
+                "default_max_velocity_meters_per_sec": float(
+                    self.default_max_velocity_meters_per_sec
+                ),
+                "default_max_acceleration_meters_per_sec2": float(
+                    self.default_max_acceleration_meters_per_sec2
+                ),
+                "default_intermediate_handoff_radius_meters": float(
+                    self.default_intermediate_handoff_radius_meters
+                ),
+                "default_max_velocity_deg_per_sec": float(self.default_max_velocity_deg_per_sec),
+                "default_max_acceleration_deg_per_sec2": float(
+                    self.default_max_acceleration_deg_per_sec2
+                ),
+                "default_end_translation_tolerance_meters": float(
+                    self.default_end_translation_tolerance_meters
+                ),
+                "default_end_rotation_tolerance_deg": float(self.default_end_rotation_tolerance_deg),
+            },
+        }
+
+    def to_flat_dict(self) -> Dict[str, Any]:
+        side = self._normalize_protrusion_side(self.protrusion_side, "none")
+        distance = float(max(0.0, self.protrusion_distance_meters))
+        enabled = bool(self.protrusion_enabled)
+        default_state = (
+            self._normalize_protrusion_state(self.protrusion_default_state, "") if enabled else ""
+        )
+        legacy_front = distance if enabled and side == "front" else 0.0
+        legacy_back = distance if enabled and side == "back" else 0.0
+        legacy_left = distance if enabled and side == "left" else 0.0
+        legacy_right = distance if enabled and side == "right" else 0.0
+
+        return {
+            "robot_length_meters": float(self.robot_length_meters),
+            "robot_width_meters": float(self.robot_width_meters),
+            "protrusion_enabled": enabled,
+            "protrusion_distance_meters": distance,
+            "protrusion_side": side,
+            "protrusion_default_state": default_state,
+            "protrusion_show_on_event_keys": self._normalize_key_list(
+                self.protrusion_show_on_event_keys
+            ),
+            "protrusion_hide_on_event_keys": self._normalize_key_list(
+                self.protrusion_hide_on_event_keys
+            ),
+            # Legacy compatibility projection (directional distances)
+            "robot_protrusion_front_meters": legacy_front,
+            "robot_protrusion_back_meters": legacy_back,
+            "robot_protrusion_left_meters": legacy_left,
+            "robot_protrusion_right_meters": legacy_right,
+            "default_max_velocity_meters_per_sec": float(self.default_max_velocity_meters_per_sec),
+            "default_max_acceleration_meters_per_sec2": float(
+                self.default_max_acceleration_meters_per_sec2
+            ),
+            "default_intermediate_handoff_radius_meters": float(
+                self.default_intermediate_handoff_radius_meters
+            ),
+            "default_max_velocity_deg_per_sec": float(self.default_max_velocity_deg_per_sec),
+            "default_max_acceleration_deg_per_sec2": float(
+                self.default_max_acceleration_deg_per_sec2
+            ),
+            "default_end_translation_tolerance_meters": float(
+                self.default_end_translation_tolerance_meters
+            ),
+            "default_end_rotation_tolerance_deg": float(self.default_end_rotation_tolerance_deg),
+        }
 
     def get_default_optional_value(self, key: str) -> Optional[float]:
         # Prefer default_* keys but fall back to raw key to handle legacy lookups
@@ -209,11 +536,15 @@ class ProjectManager:
             return self.config
         cfg_path = os.path.join(self.project_dir, "config.json")
         try:
+            migrated = False
             if os.path.exists(cfg_path):
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
                     self.config = ProjectConfig.from_mapping(data)
+                    migrated = ProjectConfig.needs_migration(data)
+            if migrated:
+                self.save_config()
         except Exception:
             # Keep existing config on error
             pass
@@ -234,8 +565,8 @@ class ProjectManager:
     def get_default_optional_value(self, key: str) -> Optional[float]:
         return self.config.get_default_optional_value(key)
 
-    def config_as_dict(self) -> Dict[str, float]:
-        return self.config.to_dict()
+    def config_as_dict(self) -> Dict[str, Any]:
+        return self.config.to_flat_dict()
 
     # --------------- Paths listing ---------------
     def list_paths(self) -> List[str]:

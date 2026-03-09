@@ -119,6 +119,16 @@ class CanvasView(QGraphicsView):
         self._pan_start: Optional[QPoint] = None
         self.robot_length_m = ELEMENT_RECT_WIDTH_M
         self.robot_width_m = ELEMENT_RECT_HEIGHT_M
+        self.protrusion_enabled: bool = False
+        self.protrusion_distance_m: float = 0.0
+        self.protrusion_side: str = "none"
+        self.protrusion_default_state: str = ""
+        self.protrusion_show_on_event_keys: set[str] = set()
+        self.protrusion_hide_on_event_keys: set[str] = set()
+        self._protrusion_current_visible: bool = False
+        self._protrusion_trigger_schedule: list[tuple[float, bool]] = []
+        self._element_protrusion_visibility_by_index: dict[int, bool] = {}
+        self._sim_global_s_by_time: dict[float, float] = {}
         self._field_offset: float = FIELD_OFFSET_M  # 0.5m for 2026
         self.graphics_scene = QGraphicsScene(self)
         self.setScene(self.graphics_scene)
@@ -212,23 +222,101 @@ class CanvasView(QGraphicsView):
             pass
         self._rebuild_items()
         self._on_scene_selection_changed()
+        self._rebuild_protrusion_trigger_schedule()
+        self._rebuild_element_protrusion_visibility_map()
+        self._apply_protrusion_visual_to_all_items()
+        self._set_protrusion_visible(self._default_protrusion_visible())
         if self._path:
             self._reproject_rotation_items_in_scene()
         self.request_simulation_rebuild()
+
+    @staticmethod
+    def _coerce_bool(value: Any, fallback: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("1", "true", "yes", "on", "enabled"):
+                return True
+            if lowered in ("0", "false", "no", "off", "disabled"):
+                return False
+        return fallback
+
+    @staticmethod
+    def _normalize_protrusion_side(value: Any) -> str:
+        raw = str(value).strip().lower()
+        return raw if raw in ("none", "left", "right", "front", "back") else "none"
+
+    @staticmethod
+    def _normalize_protrusion_state(value: Any) -> str:
+        raw = str(value).strip().lower()
+        if raw in ("shown", "show", "visible", "on", "true", "1"):
+            return "shown"
+        if raw in ("hidden", "hide", "invisible", "off", "false", "0"):
+            return "hidden"
+        return ""
+
+    @staticmethod
+    def _normalize_event_key_set(value: Any) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            raw_items = value.replace("\n", ",").split(",")
+        elif isinstance(value, (list, tuple, set)):
+            raw_items = [str(v) for v in value]
+        else:
+            raw_items = [str(value)]
+        return {str(v).strip() for v in raw_items if str(v).strip()}
+
+    def _default_protrusion_visible(self) -> bool:
+        return bool(self.protrusion_enabled and self.protrusion_default_state == "shown")
 
     def set_robot_dimensions(self, length_m: float, width_m: float):
         try:
             self.robot_length_m = float(length_m)
             self.robot_width_m = float(width_m)
+            cfg = {}
+            if hasattr(self, "_project_manager") and self._project_manager:
+                if hasattr(self._project_manager, "config_as_dict"):
+                    cfg = self._project_manager.config_as_dict()
+                else:
+                    cfg = dict(getattr(self._project_manager, "config", {}) or {})
+            self.protrusion_enabled = self._coerce_bool(
+                cfg.get("protrusion_enabled", self.protrusion_enabled),
+                self.protrusion_enabled,
+            )
+            self.protrusion_distance_m = max(
+                0.0,
+                float(cfg.get("protrusion_distance_meters", self.protrusion_distance_m) or 0.0),
+            )
+            self.protrusion_side = self._normalize_protrusion_side(
+                cfg.get("protrusion_side", self.protrusion_side)
+            )
+            self.protrusion_default_state = self._normalize_protrusion_state(
+                cfg.get("protrusion_default_state", self.protrusion_default_state)
+            )
+            if not self.protrusion_enabled:
+                self.protrusion_default_state = ""
+            self.protrusion_show_on_event_keys = self._normalize_event_key_set(
+                cfg.get("protrusion_show_on_event_keys", self.protrusion_show_on_event_keys)
+            )
+            self.protrusion_hide_on_event_keys = self._normalize_event_key_set(
+                cfg.get("protrusion_hide_on_event_keys", self.protrusion_hide_on_event_keys)
+            )
         except Exception:
             return
         self._rebuild_items()
+        self._rebuild_protrusion_trigger_schedule()
+        self._rebuild_element_protrusion_visibility_map()
+        self._apply_protrusion_visual_to_all_items()
+        self._set_protrusion_visible(self._default_protrusion_visible())
         if self._path:
             self._reproject_rotation_items_in_scene()
         try:
             self._ensure_sim_robot_item()
-            if self._sim_robot_item:
-                self._sim_robot_item.set_dimensions(self.robot_length_m, self.robot_width_m)
+            self._update_sim_robot_dimensions()
         except Exception:
             pass
 
@@ -320,6 +408,9 @@ class CanvasView(QGraphicsView):
         finally:
             self._suppress_live_events = False
         self._update_connecting_lines()
+        self._rebuild_protrusion_trigger_schedule()
+        self._rebuild_element_protrusion_visibility_map()
+        self._apply_protrusion_visual_to_all_items()
         if self._path:
             self._reproject_rotation_items_in_scene()
         self.request_simulation_rebuild()
@@ -624,6 +715,7 @@ class CanvasView(QGraphicsView):
                 item.set_angle_radians(ang)
                 rotation_handle.set_angle(ang)
                 rotation_handle.sync_to_angle()
+                self._apply_protrusion_visual_to_item(kind, item)
                 handoff_visualizer = None
             elif isinstance(element, EventTrigger):
                 kind = "event_trigger"
@@ -656,6 +748,7 @@ class CanvasView(QGraphicsView):
                 item.set_angle_radians(ang)
                 rotation_handle.set_angle(ang)
                 rotation_handle.sync_to_angle()
+                self._apply_protrusion_visual_to_item(kind, item)
                 handoff_visualizer = None
                 radius = getattr(
                     element.translation_target, "intermediate_handoff_radius_meters", None
@@ -694,6 +787,119 @@ class CanvasView(QGraphicsView):
             self._handoff_visualizers.append(handoff_visualizer)
         self._build_connecting_lines()
         self._apply_selection_layering(set())
+
+    def _apply_protrusion_visual_to_item(self, kind: str, item):
+        if kind not in ("rotation", "waypoint"):
+            return
+        try:
+            index_in_model = int(getattr(item, "index_in_model", -1))
+            shown = self._element_protrusion_visibility_by_index.get(
+                index_in_model, self._default_protrusion_visible()
+            )
+            item.set_protrusion_visual(
+                enabled=self.protrusion_enabled,
+                shown=shown,
+                side=self.protrusion_side,
+                distance_m=self.protrusion_distance_m,
+            )
+        except Exception:
+            pass
+
+    def _apply_protrusion_visual_to_all_items(self):
+        if not self._items:
+            return
+        for kind, item, _ in self._items:
+            self._apply_protrusion_visual_to_item(kind, item)
+
+    def _set_protrusion_visible(self, visible: bool):
+        self._protrusion_current_visible = bool(visible)
+        self._update_sim_robot_dimensions()
+
+    def _update_sim_robot_dimensions(self):
+        if self._sim_robot_item is None:
+            return
+        side = self._normalize_protrusion_side(self.protrusion_side)
+        side_valid = side in ("front", "back", "left", "right")
+        protrusion_visible = bool(
+            self.protrusion_enabled
+            and self._protrusion_current_visible
+            and self.protrusion_distance_m > 0.0
+            and side_valid
+        )
+        try:
+            self._sim_robot_item.set_dimensions(
+                self.robot_length_m,
+                self.robot_width_m,
+                protrusion_visible=protrusion_visible,
+                protrusion_distance_m=self.protrusion_distance_m,
+                protrusion_side=side,
+            )
+        except Exception:
+            pass
+
+    def _protrusion_visible_at_s(self, s_value: float) -> bool:
+        if not self.protrusion_enabled:
+            return False
+        visible = self._default_protrusion_visible()
+        for event_s, action in self._protrusion_trigger_schedule:
+            if s_value + 1e-6 >= event_s:
+                visible = bool(action)
+            else:
+                break
+        return bool(visible)
+
+    def _neighbor_anchor_indices(self, index: int) -> tuple[Optional[int], Optional[int]]:
+        if self._path is None:
+            return None, None
+        prev_anchor_idx = None
+        for j in range(index - 1, -1, -1):
+            e = self._path.path_elements[j]
+            if isinstance(e, (TranslationTarget, Waypoint)):
+                prev_anchor_idx = j
+                break
+        next_anchor_idx = None
+        for j in range(index + 1, len(self._path.path_elements)):
+            e = self._path.path_elements[j]
+            if isinstance(e, (TranslationTarget, Waypoint)):
+                next_anchor_idx = j
+                break
+        return prev_anchor_idx, next_anchor_idx
+
+    def _rebuild_element_protrusion_visibility_map(self):
+        self._element_protrusion_visibility_by_index = {}
+        if self._path is None:
+            return
+
+        _segments, anchor_s_by_path_index, _total_len = self._build_anchor_progress_geometry()
+        if not anchor_s_by_path_index:
+            return
+
+        for idx, element in enumerate(self._path.path_elements):
+            if isinstance(element, Waypoint):
+                s_value = float(anchor_s_by_path_index.get(idx, 0.0))
+                self._element_protrusion_visibility_by_index[idx] = self._protrusion_visible_at_s(
+                    s_value
+                )
+            elif isinstance(element, RotationTarget):
+                prev_anchor_idx, next_anchor_idx = self._neighbor_anchor_indices(idx)
+                if (
+                    prev_anchor_idx is None
+                    or next_anchor_idx is None
+                    or prev_anchor_idx not in anchor_s_by_path_index
+                    or next_anchor_idx not in anchor_s_by_path_index
+                ):
+                    self._element_protrusion_visibility_by_index[idx] = (
+                        self._protrusion_visible_at_s(0.0)
+                    )
+                    continue
+                s0 = float(anchor_s_by_path_index[prev_anchor_idx])
+                s1 = float(anchor_s_by_path_index[next_anchor_idx])
+                span = max(0.0, s1 - s0)
+                t_ratio = max(0.0, min(1.0, float(getattr(element, "t_ratio", 0.0))))
+                s_value = s0 + (span * t_ratio)
+                self._element_protrusion_visibility_by_index[idx] = self._protrusion_visible_at_s(
+                    s_value
+                )
 
     # ------------- Geometry helpers -------------
     def _angle_for_translation_index(self, index: int) -> float:
@@ -873,8 +1079,20 @@ class CanvasView(QGraphicsView):
         """
         return float(x_s - self._field_offset), float(FIELD_WIDTH_METERS - y_s - self._field_offset)
 
+    def _robot_half_extents(self) -> Tuple[float, float]:
+        return max(0.0, self.robot_length_m * 0.5), max(0.0, self.robot_width_m * 0.5)
+
     def _clamp_scene_coords(self, x_s: float, y_s: float) -> Tuple[float, float]:
         return max(0.0, min(x_s, FIELD_LENGTH_METERS)), max(0.0, min(y_s, FIELD_WIDTH_METERS))
+
+    def _clamp_scene_coords_with_robot_perimeter(
+        self, x_s: float, y_s: float
+    ) -> Tuple[float, float]:
+        hx, hy = self._robot_half_extents()
+        return (
+            max(hx, min(x_s, FIELD_LENGTH_METERS - hx)),
+            max(hy, min(y_s, FIELD_WIDTH_METERS - hy)),
+        )
 
     def _constrain_scene_coords_for_index(
         self, index: int, x_s: float, y_s: float
@@ -887,7 +1105,7 @@ class CanvasView(QGraphicsView):
         except Exception:
             return x_s, y_s
         if kind not in ("rotation", "event_trigger"):
-            return x_s, y_s
+            return self._clamp_scene_coords_with_robot_perimeter(x_s, y_s)
         prev_pos, next_pos = self._find_neighbor_item_positions(index)
         if prev_pos is None or next_pos is None:
             return x_s, y_s
@@ -902,7 +1120,7 @@ class CanvasView(QGraphicsView):
         t = max(0.0, min(1.0, t))
         proj_x = ax + t * dx
         proj_y = ay + t * dy
-        return self._clamp_scene_coords(proj_x, proj_y)
+        return self._clamp_scene_coords_with_robot_perimeter(proj_x, proj_y)
 
     def _find_neighbor_item_positions(
         self, index: int
@@ -1031,6 +1249,156 @@ class CanvasView(QGraphicsView):
             self._press_start_angle_radians = None
         self.request_simulation_rebuild()
 
+    def _build_anchor_progress_geometry(
+        self,
+    ) -> tuple[
+        list[tuple[float, float, float, float, float, float, float]], dict[int, float], float
+    ]:
+        if self._path is None:
+            return [], {}, 0.0
+
+        anchors: list[tuple[int, float, float]] = []
+        for idx, element in enumerate(self._path.path_elements):
+            if isinstance(element, TranslationTarget):
+                anchors.append((idx, float(element.x_meters), float(element.y_meters)))
+            elif isinstance(element, Waypoint):
+                anchors.append(
+                    (
+                        idx,
+                        float(element.translation_target.x_meters),
+                        float(element.translation_target.y_meters),
+                    )
+                )
+
+        if len(anchors) < 2:
+            anchor_map = {anchors[0][0]: 0.0} if anchors else {}
+            return [], anchor_map, 0.0
+
+        segments: list[tuple[float, float, float, float, float, float, float]] = []
+        anchor_s_by_path_index: dict[int, float] = {}
+        cumulative = 0.0
+        anchor_s_by_path_index[anchors[0][0]] = 0.0
+        for i in range(len(anchors) - 1):
+            idx_a, ax, ay = anchors[i]
+            idx_b, bx, by = anchors[i + 1]
+            dx = bx - ax
+            dy = by - ay
+            denom = dx * dx + dy * dy
+            seg_len = math.hypot(dx, dy)
+            start_s = cumulative
+            cumulative += seg_len
+            anchor_s_by_path_index[idx_a] = start_s
+            anchor_s_by_path_index[idx_b] = cumulative
+            segments.append((ax, ay, dx, dy, denom, start_s, seg_len))
+
+        return segments, anchor_s_by_path_index, cumulative
+
+    def _project_point_to_global_s(
+        self,
+        x_m: float,
+        y_m: float,
+        segments: list[tuple[float, float, float, float, float, float, float]],
+        fallback_s: float,
+    ) -> float:
+        if not segments:
+            return float(fallback_s)
+
+        best_s = float(fallback_s)
+        best_dist2: Optional[float] = None
+        for ax, ay, dx, dy, denom, start_s, seg_len in segments:
+            t = 0.0
+            if denom > 1e-12:
+                t = ((x_m - ax) * dx + (y_m - ay) * dy) / denom
+                t = max(0.0, min(1.0, t))
+            proj_x = ax + t * dx
+            proj_y = ay + t * dy
+            dist2 = (x_m - proj_x) ** 2 + (y_m - proj_y) ** 2
+            s_val = start_s + (seg_len * t)
+            if best_dist2 is None or dist2 < best_dist2:
+                best_dist2 = dist2
+                best_s = s_val
+        return float(best_s)
+
+    def _rebuild_protrusion_trigger_schedule(self):
+        self._protrusion_trigger_schedule = []
+        if self._path is None or not self.protrusion_enabled:
+            return
+
+        show_keys = set(self.protrusion_show_on_event_keys)
+        hide_keys = set(self.protrusion_hide_on_event_keys)
+        if not show_keys and not hide_keys:
+            return
+
+        _segments, anchor_s_by_path_index, _total_len = self._build_anchor_progress_geometry()
+        if not anchor_s_by_path_index:
+            return
+
+        trigger_schedule: list[tuple[float, int, bool]] = []
+        for idx, element in enumerate(self._path.path_elements):
+            if not isinstance(element, EventTrigger):
+                continue
+            key = str(getattr(element, "lib_key", "")).strip()
+            if not key:
+                continue
+
+            action: Optional[bool] = None
+            if key in show_keys:
+                action = True
+            elif key in hide_keys:
+                action = False
+            if action is None:
+                continue
+
+            prev_anchor_idx, next_anchor_idx = self._neighbor_anchor_indices(idx)
+            if prev_anchor_idx is None or next_anchor_idx is None:
+                continue
+            if (
+                prev_anchor_idx not in anchor_s_by_path_index
+                or next_anchor_idx not in anchor_s_by_path_index
+            ):
+                continue
+
+            s0 = float(anchor_s_by_path_index[prev_anchor_idx])
+            s1 = float(anchor_s_by_path_index[next_anchor_idx])
+            span = max(0.0, s1 - s0)
+            t_ratio = max(0.0, min(1.0, float(getattr(element, "t_ratio", 0.0))))
+            trigger_schedule.append((s0 + span * t_ratio, idx, action))
+
+        trigger_schedule.sort(key=lambda x: (x[0], x[1]))
+        self._protrusion_trigger_schedule = [
+            (s_val, action) for s_val, _idx, action in trigger_schedule
+        ]
+
+    def _global_s_for_time(self, t_s: float, key_hint: Optional[float] = None) -> float:
+        if not self._sim_global_s_by_time:
+            return 0.0
+        if key_hint is not None and key_hint in self._sim_global_s_by_time:
+            return float(self._sim_global_s_by_time.get(key_hint, 0.0))
+        if not self._sim_times_sorted:
+            return 0.0
+        selected = self._sim_times_sorted[0]
+        for tk in self._sim_times_sorted:
+            if tk <= t_s:
+                selected = tk
+            else:
+                break
+        return float(self._sim_global_s_by_time.get(selected, 0.0))
+
+    def _update_protrusion_visibility_for_time(self, t_s: float, key_hint: Optional[float] = None):
+        if not self.protrusion_enabled:
+            self._set_protrusion_visible(False)
+            return
+
+        visible = self._default_protrusion_visible()
+        if self._protrusion_trigger_schedule and self._sim_global_s_by_time:
+            s_now = self._global_s_for_time(t_s, key_hint=key_hint)
+            for event_s, action in self._protrusion_trigger_schedule:
+                if s_now + 1e-6 >= event_s:
+                    visible = bool(action)
+                else:
+                    break
+        self._set_protrusion_visible(visible)
+
     # -------- Simulation API (subset) --------
     def request_simulation_rebuild(self):
         try:
@@ -1047,7 +1415,7 @@ class CanvasView(QGraphicsView):
             self._sim_robot_item = item
             item.setVisible(False)
             try:
-                item.set_dimensions(self.robot_length_m, self.robot_width_m)
+                self._update_sim_robot_dimensions()
             except Exception:
                 pass
         except Exception:
@@ -1177,6 +1545,7 @@ class CanvasView(QGraphicsView):
             )
             self._set_sim_robot_pose(x, y, th)
             self._update_trail_visibility(key_index)
+            self._update_protrusion_visibility_for_time(t_s, key_hint=key)
             if self.transport.label:
                 self.transport.label.setText(f"{t_s:.2f} / {self._sim_total_time_s:.2f} s")
             self._update_sim_robot_visibility()
@@ -1221,6 +1590,7 @@ class CanvasView(QGraphicsView):
                 self._sim_times_sorted = []
                 self._sim_total_time_s = 0.0
                 self._sim_current_time_s = 0.0
+                self._sim_global_s_by_time = {}
                 if self._sim_robot_item:
                     self._sim_robot_item.setVisible(False)
                 self._clear_trail()
@@ -1228,6 +1598,8 @@ class CanvasView(QGraphicsView):
                     self.transport.slider.setRange(0, 0)
                 if self.transport.label:
                     self.transport.label.setText("0.00 / 0.00 s")
+                self._rebuild_protrusion_trigger_schedule()
+                self._set_protrusion_visible(self._default_protrusion_visible())
                 return
             cfg = {}
             try:
@@ -1244,6 +1616,22 @@ class CanvasView(QGraphicsView):
             self._sim_times_sorted = result.times_sorted
             self._sim_total_time_s = float(result.total_time_s)
             self._sim_current_time_s = 0.0
+            segments, _anchor_map, total_len = self._build_anchor_progress_geometry()
+            self._sim_global_s_by_time = {}
+            if segments and self._sim_times_sorted:
+                last_s = 0.0
+                for tk in self._sim_times_sorted:
+                    pose = self._sim_poses_by_time.get(tk)
+                    if pose is None:
+                        continue
+                    x_m, y_m, _ = pose
+                    s_val = self._project_point_to_global_s(
+                        float(x_m), float(y_m), segments, fallback_s=last_s
+                    )
+                    s_val = min(float(total_len), max(last_s, s_val))
+                    self._sim_global_s_by_time[tk] = s_val
+                    last_s = s_val
+            self._rebuild_protrusion_trigger_schedule()
             if self.transport.slider:
                 self.transport.slider.blockSignals(True)
                 self.transport.slider.setRange(0, int(round(self._sim_total_time_s * 10000.0)))
@@ -1255,7 +1643,10 @@ class CanvasView(QGraphicsView):
                 t0 = self._sim_times_sorted[0]
                 x, y, th = self._sim_poses_by_time.get(t0, (0.0, 0.0, 0.0))
                 self._set_sim_robot_pose(x, y, th)
+                self._update_protrusion_visibility_for_time(0.0, key_hint=t0)
                 self._update_sim_robot_visibility()
+            else:
+                self._set_protrusion_visible(self._default_protrusion_visible())
             if hasattr(result, "trail_points") and result.trail_points:
                 self._setup_trail(result.trail_points)
             else:

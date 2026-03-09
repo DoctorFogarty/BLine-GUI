@@ -44,6 +44,25 @@ def _highlight_margin(padding: float, width: float) -> float:
     return padding + 0.5 * width * SELECTION_PULSE_WIDTH_SCALE_MAX
 
 
+def _apply_rotation_dash_style(pen: QPen) -> QPen:
+    try:
+        # Frequent dash pattern with visible gaps; use FlatCap so gaps remain open
+        pen.setStyle(Qt.CustomDashLine)
+        pen.setDashPattern([1, 0.5])
+    except Exception:
+        pen.setStyle(Qt.DashLine)
+    pen.setCapStyle(Qt.FlatCap)
+    # Slightly thin the dashed stroke so it doesn't read as solid
+    try:
+        current_w = float(pen.widthF())
+        pen.setWidthF(max(0.02, current_w * 0.8))
+    except Exception:
+        pass
+    pen.setJoinStyle(Qt.MiterJoin)
+    pen.setCosmetic(False)
+    return pen
+
+
 class CircleElementItem(QGraphicsEllipseItem):
     def __init__(
         self,
@@ -202,29 +221,29 @@ class RectElementItem(QGraphicsRectItem):
         self.index_in_model = index_in_model
         rw = getattr(self.canvas_view, "robot_length_m", 0.60)
         rh = getattr(self.canvas_view, "robot_width_m", 0.60)
+        self._outline_color = outline_color or QColor("#000")
+        self._protrusion_enabled: bool = False
+        self._protrusion_shown: bool = False
+        self._protrusion_side: str = "none"
+        self._protrusion_distance_m: float = 0.0
+        self._protrusion_lines: List[QGraphicsLineItem] = []
         pen_width_m = OUTLINE_THICK_M if (outline_color and not dashed_outline) else OUTLINE_THIN_M
         inset = (pen_width_m if outline_color else 0.0) * 0.5
-        self.setRect(-(rw / 2.0) + inset, -(rh / 2.0) + inset, rw - inset * 2, rh - inset * 2)
+        x_min = -(rw / 2.0)
+        x_max = rw / 2.0
+        y_min = -(rh / 2.0)
+        y_max = rh / 2.0
+        self.setRect(
+            x_min + inset, y_min + inset, (x_max - x_min) - inset * 2, (y_max - y_min) - inset * 2
+        )
         self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
-        pen = QPen(outline_color or QColor("#000"), pen_width_m if outline_color else 0.0)
+        pen = QPen(self._outline_color, pen_width_m if outline_color else 0.0)
         if dashed_outline:
-            try:
-                # Frequent dash pattern with visible gaps; use FlatCap so gaps remain open
-                pen.setStyle(Qt.CustomDashLine)
-                pen.setDashPattern([1, 0.5])
-            except Exception:
-                pen.setStyle(Qt.DashLine)
-            pen.setCapStyle(Qt.FlatCap)
-            # Slightly thin the dashed stroke so it doesn't read as solid
-            try:
-                current_w = float(pen.widthF())
-                pen.setWidthF(max(0.02, current_w * 0.8))
-            except Exception:
-                pass
+            pen = _apply_rotation_dash_style(pen)
         else:
             pen.setCapStyle(Qt.SquareCap)
-        pen.setJoinStyle(Qt.MiterJoin)
-        pen.setCosmetic(False)
+            pen.setJoinStyle(Qt.MiterJoin)
+            pen.setCosmetic(False)
         self.setPen(pen)
         if filled_color and not isinstance(
             self.canvas_view._path.path_elements[index_in_model], Waypoint
@@ -242,14 +261,16 @@ class RectElementItem(QGraphicsRectItem):
         self._corner_squares: List[QGraphicsRectItem] = []
         if dashed_outline:
             try:
-                self._create_corner_squares(outline_color or QColor("#000"), float(pen.widthF()))
+                self._create_corner_squares(self._outline_color, float(pen.widthF()))
             except Exception:
                 self._corner_squares = []
         self._angle_radians: float = 0.0
+        self._refresh_protrusion_item()
 
     def _build_triangle(self, color: QColor):
-        rw = getattr(self.canvas_view, "robot_length_m", 0.60)
-        rh = getattr(self.canvas_view, "robot_width_m", 0.60)
+        r = self.rect()
+        rw = float(r.width())
+        rh = float(r.height())
         base_size = min(rw, rh) * TRIANGLE_REL_SIZE
         half_base = base_size * 0.5
         height = base_size
@@ -284,6 +305,83 @@ class RectElementItem(QGraphicsRectItem):
         base_rect = super().boundingRect()
         margin = _highlight_margin(SELECTION_RECT_OUTLINE_PADDING_M, SELECTION_RECT_OUTLINE_WIDTH_M)
         return base_rect.adjusted(-margin, -margin, margin, margin)
+
+    def set_protrusion_visual(self, *, enabled: bool, shown: bool, side: str, distance_m: float):
+        self._protrusion_enabled = bool(enabled)
+        self._protrusion_shown = bool(shown)
+        self._protrusion_side = str(side or "none").strip().lower()
+        self._protrusion_distance_m = max(0.0, float(distance_m))
+        self._refresh_protrusion_item()
+
+    def _refresh_protrusion_item(self):
+        valid_side = self._protrusion_side in ("front", "back", "left", "right")
+        should_draw = (
+            self._protrusion_enabled
+            and self._protrusion_shown
+            and valid_side
+            and self._protrusion_distance_m > 0.0
+        )
+
+        if not should_draw:
+            for line in self._protrusion_lines:
+                line.setVisible(False)
+            return
+
+        while len(self._protrusion_lines) < 3:
+            line = QGraphicsLineItem(self)
+            line.setZValue(self.zValue() + 0.7)
+            self._protrusion_lines.append(line)
+
+        pen = QPen(self._outline_color, OUTLINE_THIN_M)
+        pen = _apply_rotation_dash_style(pen)
+        for line in self._protrusion_lines:
+            line.setPen(pen)
+
+        r = self.rect()
+        rect_pen_width = float(self.pen().widthF()) if self.pen() is not None else OUTLINE_THIN_M
+        protrusion_pen_width = float(pen.widthF())
+
+        left = float(r.left())
+        right = float(r.right())
+        top = float(r.top())
+        bottom = float(r.bottom())
+        outer_left = left - (rect_pen_width * 0.5)
+        outer_right = right + (rect_pen_width * 0.5)
+        outer_top = top - (rect_pen_width * 0.5)
+        outer_bottom = bottom + (rect_pen_width * 0.5)
+        line_half = protrusion_pen_width * 0.5
+        edge_offset = self._protrusion_distance_m
+        top_y = outer_top + line_half
+        bottom_y = outer_bottom - line_half
+        left_x = outer_left + line_half
+        right_x = outer_right - line_half
+
+        side = self._protrusion_side
+        if side == "front":
+            x = outer_right + edge_offset + line_half
+            self._protrusion_lines[0].setLine(x, top_y, x, bottom_y)
+            self._protrusion_lines[1].setLine(outer_right, top_y, x, top_y)
+            self._protrusion_lines[2].setLine(outer_right, bottom_y, x, bottom_y)
+        elif side == "back":
+            x = outer_left - edge_offset - line_half
+            self._protrusion_lines[0].setLine(x, top_y, x, bottom_y)
+            self._protrusion_lines[1].setLine(outer_left, top_y, x, top_y)
+            self._protrusion_lines[2].setLine(outer_left, bottom_y, x, bottom_y)
+        elif side == "left":
+            # Robot-left is negative local Y after model->scene conversion.
+            y = outer_top - edge_offset - line_half
+            self._protrusion_lines[0].setLine(left_x, y, right_x, y)
+            self._protrusion_lines[1].setLine(left_x, outer_top, left_x, y)
+            self._protrusion_lines[2].setLine(right_x, outer_top, right_x, y)
+        else:  # right
+            # Robot-right is positive local Y after model->scene conversion.
+            y = outer_bottom + edge_offset + line_half
+            self._protrusion_lines[0].setLine(left_x, y, right_x, y)
+            self._protrusion_lines[1].setLine(left_x, outer_bottom, left_x, y)
+            self._protrusion_lines[2].setLine(right_x, outer_bottom, right_x, y)
+
+        for line in self._protrusion_lines:
+            line.setVisible(True)
 
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         if change == QGraphicsItem.ItemPositionChange:
